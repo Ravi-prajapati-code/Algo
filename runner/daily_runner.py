@@ -1,26 +1,27 @@
 """
-Daily runner — the full pipeline, run once after market close each weekday.
+Daily runner — the full hybrid pipeline, run once after market close.
 
 Pipeline
 --------
-  1. Initialise DB
-  2. Fetch fresh OHLCV data for all watchlist symbols
-  3. Fetch market index (^NSEI) — MANDATORY, validated before continuing
-  4. Detect market regime — UNKNOWN regime blocks ALL new BUY entries
-  5. Compute technical indicators
-  6. Load open positions
-  7. Generate SELL/HOLD signals for open positions
-  8. Generate BUY signals (only if regime is known and bullish)
-  9. Process signals through portfolio manager (size, allocate, charge)
-  10. Save signals + portfolio state to JSON
-  11. Send Telegram alert
+  1.  Initialise DB
+  2.  Fetch market index (^NSEI) — validated first, blocks trading if insufficient
+  3.  Detect market regime (BULL/BEAR/SIDEWAYS/HIGH_VOL/UNKNOWN)
+  4.  Fetch stock OHLCV data
+  5.  Compute relative strength for all symbols vs Nifty
+  6.  Compute technical indicators (enriched with RS + quality fields)
+  7.  Load open positions
+  8.  Generate SELL/HOLD signals (always runs, even in BEAR/UNKNOWN)
+  9.  Generate BUY signals (only when regime allows)
+  10. Process signals through portfolio manager
+  11. Write output JSON files
+  12. Send Telegram alert
 
 Safety guarantees
 -----------------
-- Index data is fetched BEFORE indicator computation.
-- If index fetch returns empty or < MIN_INDEX_CANDLES bars, regime is set
-  to UNKNOWN and ALL new BUY signals are suppressed.
-- Existing positions are always evaluated for SELL/HOLD regardless of regime.
+- Index fetched and validated before any strategy code runs.
+- UNKNOWN regime → all new BUYs suppressed, exits evaluated normally.
+- RS computed once for the full watchlist (efficient batch operation).
+- Rich per-stock log shows every action with price and P&L.
 """
 
 import logging
@@ -28,16 +29,18 @@ import sys
 import os
 from datetime import date
 
-# Ensure project root is on path when run from GitHub Actions
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from db.repository import init_db, load_open_positions, load_snapshots, save_signal
+from db.repository import (
+    init_db, load_open_positions, load_snapshots, save_signal,
+)
 from data.fetcher import fetch_all, fetch_index
 from data.universe import get_all_symbols
 from indicators.composite import compute_all
 from strategy.signals import generate_signals
 from strategy.market_filter import is_market_bullish
 from strategy.regime import detect_regime, is_buy_allowed, MIN_INDEX_CANDLES
+from strategy.relative_strength import compute_rs_for_all
 from portfolio.manager import PortfolioManager
 from runner.signal_output import write_signals, write_portfolio_state
 from config.settings import INITIAL_CAPITAL, MARKET_INDEX_SYMBOL, MARKET_FILTER_SMA
@@ -59,29 +62,31 @@ def run(today: date = None):
     # ── 1. Initialise DB ──────────────────────────────────────────────────
     init_db()
 
-    # ── 2. Fetch market index FIRST (mandatory before strategy) ───────────
-    logger.info("Fetching market index %s (need ≥ %d candles)…", MARKET_INDEX_SYMBOL, MIN_INDEX_CANDLES)
+    # ── 2. Fetch index (mandatory before everything else) ─────────────────
+    logger.info(
+        "Fetching market index %s (need ≥ %d candles)…",
+        MARKET_INDEX_SYMBOL, MIN_INDEX_CANDLES,
+    )
     index_df = fetch_index(MARKET_INDEX_SYMBOL, lookback_days=MIN_INDEX_CANDLES + 50)
-
-    # ── 3. Validate index data before proceeding ──────────────────────────
     index_candles = len(index_df) if index_df is not None and not index_df.empty else 0
+
+    # ── 3. Detect regime ──────────────────────────────────────────────────
     if index_candles < MIN_INDEX_CANDLES:
         logger.warning(
             "Trading disabled due to insufficient market data: "
-            "%d candles available for %s, need ≥ %d. "
-            "All new BUY signals suppressed. "
-            "SELL/HOLD signals for existing positions will still be generated.",
+            "%d candles for %s, need ≥ %d. "
+            "New BUY entries suppressed; exits evaluated normally.",
             index_candles, MARKET_INDEX_SYMBOL, MIN_INDEX_CANDLES,
         )
-        regime = "UNKNOWN"
+        regime         = "UNKNOWN"
         market_bullish = False
     else:
-        regime = detect_regime(index_df)
+        regime         = detect_regime(index_df)
         market_bullish = is_buy_allowed(regime)
-        if not market_bullish:
-            logger.info(
-                "Market regime is %s — new BUY signals suppressed.", regime
-            )
+        logger.info(
+            "Market regime: %s | BUY entries %s",
+            regime, "ALLOWED" if market_bullish else "BLOCKED",
+        )
 
     # ── 4. Fetch stock data ───────────────────────────────────────────────
     symbols = get_all_symbols()
@@ -93,47 +98,56 @@ def run(today: date = None):
         logger.error("No stock data fetched — aborting")
         return
 
-    # ── 5. Compute indicators ─────────────────────────────────────────────
-    indicators = compute_all(data)
+    # ── 5. Relative strength (batch, before indicators) ───────────────────
+    if market_bullish and index_df is not None and not index_df.empty:
+        logger.info("Computing relative strength vs %s…", MARKET_INDEX_SYMBOL)
+        rs_data = compute_rs_for_all(data, index_df)
+        logger.info(
+            "RS computed for %d symbols (%d pass filter)",
+            len(rs_data), sum(1 for m in rs_data.values() if m.get("rs_qualified")),
+        )
+    else:
+        rs_data = {}  # RS not needed when buys are blocked
+
+    # ── 6. Compute indicators (enriched with RS + quality) ────────────────
+    indicators = compute_all(data, rs_data=rs_data)
     logger.info("Indicators computed for %d symbols", len(indicators))
 
-    # ── 6. Load open positions ────────────────────────────────────────────
+    # ── 7. Load open positions ────────────────────────────────────────────
     open_positions = load_open_positions()
     held_symbols   = {pos.symbol for pos in open_positions}
 
-    # ── 7–8. Generate signals ─────────────────────────────────────────────
-    # market_bullish=False blocks BUY screening inside generate_signals
+    # ── 8–9. Generate signals ─────────────────────────────────────────────
+    snapshots   = load_snapshots()
+    latest_snap = snapshots[-1] if snapshots else None
+    pv          = latest_snap.total_value if latest_snap else INITIAL_CAPITAL
+    cash_bal    = latest_snap.cash        if latest_snap else INITIAL_CAPITAL
+
     signals, updated_positions = generate_signals(
         today, indicators, open_positions, held_symbols,
         market_bullish=market_bullish,
+        regime=regime,
+        portfolio_value=pv,
+        cash=cash_bal,
+        initial_capital=INITIAL_CAPITAL,
     )
 
-    buy_count  = sum(1 for s in signals if s.action == "BUY")
-    sell_count = sum(1 for s in signals if s.action == "SELL")
-    hold_count = sum(1 for s in signals if s.action == "HOLD")
-    logger.info(
-        "Signals generated — BUY: %d  SELL: %d  HOLD: %d  (regime=%s)",
-        buy_count, sell_count, hold_count, regime,
-    )
-
-    # ── 9. Process signals through portfolio manager ──────────────────────
+    # ── 10. Process through portfolio manager ─────────────────────────────
     prices = {sym: ind["close"] for sym, ind in indicators.items()}
-    mgr = PortfolioManager(INITIAL_CAPITAL)
+    mgr    = PortfolioManager(INITIAL_CAPITAL)
     mgr.process_signals(today, signals, prices)
 
-    # ── 10. Write output files ────────────────────────────────────────────
-    snapshots   = load_snapshots()
+    # ── 11. Write output files ────────────────────────────────────────────
+    snapshots   = load_snapshots()   # Reload after portfolio update
     latest_snap = snapshots[-1] if snapshots else None
 
     for sig in signals:
         save_signal(sig)
-
     write_signals(today, signals)
-
     if latest_snap:
         write_portfolio_state(today, latest_snap, mgr.open_positions, prices)
 
-    # ── 11. Telegram alert ────────────────────────────────────────────────
+    # ── 12. Telegram alert ────────────────────────────────────────────────
     try:
         from notifications.telegram import send_daily_summary
         buy_sigs  = [s for s in signals if s.action == "BUY"]

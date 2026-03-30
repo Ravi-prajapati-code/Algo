@@ -42,6 +42,17 @@ def _make_ind(**overrides) -> dict:
         "vol_ratio":      1.6,
         "vol_spike":      True,
         "vol_increasing": True,
+        # RS fields (hybrid model)
+        "rs_ratio":         1.20,
+        "rs_ratio_1m":      1.25,
+        "rs_outperforming": True,
+        "rs_accelerating":  True,
+        "rs_rank":          85.0,
+        "rs_qualified":     True,
+        # Quality field (hybrid model)
+        "quality_score_val": 18.0,
+        # 52-week context
+        "week52_high":      105.0,
     }
     base.update(overrides)
     return base
