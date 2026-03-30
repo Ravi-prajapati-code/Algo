@@ -1,59 +1,86 @@
 """
-Market regime filter.
-Only allow BUY signals when the broad market index (Nifty 50) is in an uptrend.
-This single filter prevents buying stocks during bear markets and
-significantly improves strategy performance over full market cycles.
+Market regime filter (simple bull/bear binary).
 
-Logic:
-  - Fetch Nifty 50 daily prices
-  - Compute 200-day SMA
-  - BULL if index > SMA200  →  allow BUY signals
-  - BEAR if index < SMA200  →  block ALL new BUY signals
-    (existing positions are still managed: SELL/HOLD work normally)
+Used as a backward-compatible wrapper around the full regime detector.
+`is_market_bullish()` returns False — never True — when index data is
+missing or insufficient.  The old behaviour of defaulting to True (allow
+buys) on missing data was a silent safety violation and has been removed.
+
+For the full multi-regime classifier see strategy/regime.py.
 """
 
 import logging
-import pandas as pd
-from datetime import date
 from typing import Optional
 
+import pandas as pd
+
 from config.settings import MARKET_FILTER_ENABLED, MARKET_INDEX_SYMBOL, MARKET_FILTER_SMA
+from strategy.regime import detect_regime, MIN_INDEX_CANDLES
 
 logger = logging.getLogger(__name__)
 
 
 def is_market_bullish(index_df: Optional[pd.DataFrame] = None) -> bool:
     """
-    Returns True if the market index is in bull regime (above 200-SMA).
-    Returns True (allow buys) if filter is disabled or data unavailable.
+    Returns True only if the market index is in a confirmed bull regime.
+
+    Safety rules
+    ------------
+    - Filter disabled (MARKET_FILTER_ENABLED=False): returns True (opted-out).
+    - index_df is None or has < {MIN_INDEX_CANDLES} candles: returns False.
+      Previously this returned True ("allow buys by default") which was
+      incorrect — insufficient data is NOT a signal to trade.
+    - SMA200 is NaN: returns False.
+    - Regime is UNKNOWN: returns False.
+
+    Note: this function calls detect_regime() internally so the regime log
+    message is emitted once; callers should not call both.
     """
     if not MARKET_FILTER_ENABLED:
         return True
 
-    if index_df is None or len(index_df) < MARKET_FILTER_SMA:
-        logger.warning("[MarketFilter] Insufficient index data — allowing buys by default")
-        return True
+    if index_df is None or len(index_df) < MIN_INDEX_CANDLES:
+        available = len(index_df) if index_df is not None else 0
+        logger.warning(
+            "[MarketFilter] Trading disabled due to insufficient market data: "
+            "%d candles available, need ≥ %d. Blocking all new BUY signals.",
+            available, MIN_INDEX_CANDLES,
+        )
+        return False
 
-    close = index_df["close"]
-    sma200 = close.rolling(MARKET_FILTER_SMA).mean()
-    last_close = float(close.iloc[-1])
-    last_sma   = float(sma200.iloc[-1])
+    regime = detect_regime(index_df)
 
-    bullish = last_close > last_sma
-    regime  = "BULL" if bullish else "BEAR"
-    logger.info(
-        f"[MarketFilter] {MARKET_INDEX_SYMBOL}: {last_close:.0f} vs SMA{MARKET_FILTER_SMA} "
-        f"{last_sma:.0f} → {regime}"
-    )
+    # UNKNOWN, BEAR_TREND → not bullish
+    bullish = regime in ("BULL_TREND", "SIDEWAYS", "HIGH_VOL")
+
+    if not bullish:
+        logger.info(
+            "[MarketFilter] %s: regime=%s → BUY signals BLOCKED",
+            MARKET_INDEX_SYMBOL, regime,
+        )
     return bullish
 
 
 def fetch_and_check() -> bool:
-    """Convenience: fetch Nifty 50 and return bullish flag. Used by daily runner."""
+    """
+    Fetch Nifty 50 index data and return bullish flag.
+
+    Returns False (block buys) on any fetch failure — never silently
+    allows trading when index data cannot be retrieved.
+    """
     try:
         from data.fetcher import fetch_index
-        df = fetch_index(MARKET_INDEX_SYMBOL, lookback_days=MARKET_FILTER_SMA + 50)
+        df = fetch_index(MARKET_INDEX_SYMBOL, lookback_days=MIN_INDEX_CANDLES + 50)
+        if df is None or df.empty:
+            logger.warning(
+                "[MarketFilter] fetch_and_check: index fetch returned empty DataFrame. "
+                "Trading disabled due to insufficient market data."
+            )
+            return False
         return is_market_bullish(df)
     except Exception as e:
-        logger.warning(f"[MarketFilter] Failed to fetch index: {e} — allowing buys")
-        return True
+        logger.error(
+            "[MarketFilter] fetch_and_check failed: %s. "
+            "Trading disabled due to insufficient market data.", e,
+        )
+        return False

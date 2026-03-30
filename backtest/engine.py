@@ -27,8 +27,7 @@ from config.settings import (
 )
 from indicators.composite import compute_indicators
 from strategy.signals import generate_signals
-from strategy.market_filter import is_market_bullish
-from strategy.regime import detect_regime, regime_min_score, regime_position_factor
+from strategy.regime import detect_regime, regime_min_score, regime_position_factor, is_buy_allowed
 from strategy.exit import update_trailing_stop, check_exit, initial_stops
 from backtest.slippage import apply_slippage, simulate_partial_fill
 from charges.calculator import net_pnl as calc_net_pnl, buy_charges
@@ -128,8 +127,14 @@ class BacktestEngine:
             regime = detect_regime(index_hist)
             result.regime_log[today] = regime
 
-            # Legacy boolean for backward compatibility
-            market_bullish = is_market_bullish(index_hist)
+            # UNKNOWN regime → block buys (same as BEAR_TREND).
+            # Never default to allowing trades when index data is insufficient.
+            market_bullish = is_buy_allowed(regime)
+            if regime == "UNKNOWN":
+                logger.debug(
+                    "[Backtest] %s: regime=UNKNOWN (insufficient index data) "
+                    "— trading disabled for new entries.", today,
+                )
 
             prices = {sym: ind["close"] for sym, ind in indicators.items()}
 
