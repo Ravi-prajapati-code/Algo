@@ -29,13 +29,15 @@ from indicators.composite import compute_indicators
 from strategy.signals import generate_signals
 from strategy.regime import detect_regime, regime_min_score, regime_position_factor, is_buy_allowed
 from strategy.exit import update_trailing_stop, check_exit, initial_stops
+from strategy.relative_strength import compute_rs_for_all
+from strategy.scoring import score_signal, score_to_size_factor
+from strategy.quality_filter import tier_size_factor
 from backtest.slippage import apply_slippage, simulate_partial_fill
 from charges.calculator import net_pnl as calc_net_pnl, buy_charges
 from portfolio.sizer import calculate_shares, position_value
 from portfolio.allocator import can_open_position, portfolio_invested_value
 from portfolio.risk import can_open_new_trades
 from strategy.entry import check_entry
-from strategy.scoring import score_signal
 from data.universe import get_sector
 from db.models import Position, Trade
 
@@ -105,14 +107,30 @@ class BacktestEngine:
             new_trades_today = 0
 
             # ── Build indicator snapshot for today ───────────────────
-            indicators: dict = {}
+            # Slice per-symbol data first; then batch-compute RS before indicators
+            today_stock_data: dict = {}
             for symbol, full_df in self.data.items():
                 if symbol == MARKET_INDEX_SYMBOL:
                     continue
                 hist = full_df[full_df.index <= today]
-                if len(hist) < 60:
-                    continue
-                ind = compute_indicators(hist)
+                if len(hist) >= 60:
+                    today_stock_data[symbol] = hist
+
+            if not today_stock_data:
+                continue
+
+            # Batch RS computation for today (uses sliced data)
+            index_hist_for_rs = (
+                index_df_full[index_df_full.index <= today]
+                if not index_df_full.empty else pd.DataFrame()
+            )
+            rs_data = compute_rs_for_all(today_stock_data, index_hist_for_rs)
+
+            # Build enriched indicators with RS + quality
+            indicators: dict = {}
+            for symbol, hist in today_stock_data.items():
+                rs_metrics = rs_data.get(symbol)
+                ind = compute_indicators(hist, symbol=symbol, rs_metrics=rs_metrics)
                 if ind is not None:
                     indicators[symbol] = ind
 
@@ -148,13 +166,12 @@ class BacktestEngine:
                     updated_positions.append(pos)
                     continue
                 price = ind["close"]
-                pos = update_trailing_stop(pos, price)
+                atr   = float(ind.get("atr", 0) or 0)
+                pos   = update_trailing_stop(pos, price, atr)
                 should_exit, reason = check_exit(pos, price, ind)
 
-                # Time-based exit
-                hold_days = (today - pos.entry_date).days
-                if not should_exit and hold_days >= 60:
-                    should_exit, reason = True, f"MAX_HOLD ({hold_days}d)"
+                # Time-based exit handled inside check_exit (MAX_HOLD_DAYS)
+                _ = None
 
                 if should_exit:
                     # Execution price = next bar's open with slippage
@@ -200,7 +217,7 @@ class BacktestEngine:
             for symbol, ind in indicators.items():
                 if symbol in held:
                     continue
-                ok, _ = check_entry(ind)
+                ok, _ = check_entry(ind, symbol=symbol, regime=regime)
                 if not ok:
                     continue
                 score = score_signal(ind)
@@ -220,24 +237,26 @@ class BacktestEngine:
                 if not allowed:
                     break
 
-                # Use next bar's open as execution price
                 exec_price, slip_note = self._get_execution_price(
                     symbol, today, all_dates, i, "buy", ind
                 )
                 if exec_price <= 0:
                     exec_price = ind["close"]
 
-                stops = initial_stops(exec_price)
-                atr   = ind.get("atr", 0)
+                atr   = float(ind.get("atr", 0) or 0)
+                stops = initial_stops(exec_price, atr=atr)
 
-                # Drawdown factor: reduce size if in moderate drawdown
-                drawdown = (peak_value - portfolio_val) / peak_value if peak_value > 0 else 0.0
+                drawdown  = (peak_value - portfolio_val) / peak_value if peak_value > 0 else 0.0
                 dd_factor = 0.5 if drawdown >= 0.10 else 1.0
-                combined_factor = size_factor * dd_factor
+                sc_factor = score_to_size_factor(score)
+                qt_factor = tier_size_factor(symbol)
 
                 shares = calculate_shares(
                     portfolio_val, exec_price, stops["stop_loss"],
-                    cash, atr=atr, drawdown_factor=combined_factor,
+                    cash, atr=atr,
+                    drawdown_factor=dd_factor * size_factor,
+                    score_factor=sc_factor,
+                    quality_factor=qt_factor,
                 )
                 if shares <= 0:
                     continue
