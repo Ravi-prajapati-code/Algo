@@ -29,7 +29,7 @@ def print_summary(metrics: dict):
     print(f"  Avg Loss         :  ₹{metrics['avg_loss_inr']:>+,.2f}")
     print(f"  Profit Factor    :  {metrics['profit_factor']:.2f}  {'✅' if metrics['passes_profit_factor'] else '❌'}")
     print(f"  Avg Hold Days    :  {metrics['avg_hold_days']:.1f}")
-    print(f"  Total Charges    :  ₹{metrics['total_charges_inr']:>,.2f} ({metrics['charges_drag_pct']:.2f}% drag)")
+    print(f"  Total Charges    :  ₹{metrics['total_charges_inr']:>,.2f} ({metrics['annual_charges_drag_pct']:.2f}%/yr drag)")
     print("=" * 55)
     verdict = "PASS — Ready for paper trading" if metrics["all_criteria_met"] else "FAIL — Needs tuning"
     print(f"  Overall: {verdict}")

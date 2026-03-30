@@ -18,7 +18,8 @@ CURRENCY = "INR"
 # ──────────────────────────────────────────────
 # PORTFOLIO
 # ──────────────────────────────────────────────
-INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL") or 75000) # ₹75,000 default
+
+INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL") or 75000)  # ₹75,000 default
 MAX_OPEN_POSITIONS = 15
 MAX_NEW_TRADES_PER_DAY = 5
 MAX_STOCK_ALLOCATION_PCT = 0.20     # Max 20% portfolio in any single stock
