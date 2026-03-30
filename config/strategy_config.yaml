@@ -1,0 +1,72 @@
+# ============================================================
+# Strategy Configuration
+# All strategy parameters that can be tuned without code changes.
+# Loaded by config/settings.py when PyYAML is available.
+# ============================================================
+
+strategy:
+  name: "SwingMomentum"
+  version: "2.0"
+  description: "EMA crossover + RSI + MACD + Volume swing trading strategy"
+
+  # ── Entry conditions ───────────────────────────────────────────────
+  entry:
+    ema_fast: 20
+    ema_slow: 50
+    rsi_period: 14
+    rsi_buy_min: 40          # RSI must be above this
+    rsi_buy_max: 65          # RSI must be below this
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    volume_spike_multiplier: 1.5   # Volume ≥ 1.5× 20-day avg
+    ema_crossover_lookback: 5      # Golden cross within last N days
+    min_signal_score: 40           # Minimum score (0-100) to consider a BUY
+
+  # ── Exit conditions ────────────────────────────────────────────────
+  exit:
+    stop_loss_pct: 0.06            # 6% hard stop
+    take_profit_pct: 0.13          # 13% target
+    trailing_stop_pct: 0.05        # 5% trailing from peak
+    rsi_overbought_exit: 75        # Force exit if RSI ≥ 75
+    max_hold_days: 60              # Time-based exit after 60 days
+
+  # ── Market regime filter ───────────────────────────────────────────
+  regime:
+    enabled: true
+    index_symbol: "^NSEI"
+    sma_period: 200
+    realised_vol_threshold: 0.25   # Annualised vol > 25% → HIGH_VOL regime
+    adx_trend_threshold: 25.0      # ADX > 25 → trending market
+
+  # ── Regime-specific parameters ────────────────────────────────────
+  regime_params:
+    BULL_TREND:
+      min_score: 40
+      size_factor: 1.0
+    SIDEWAYS:
+      min_score: 55
+      size_factor: 0.75
+    HIGH_VOL:
+      min_score: 70
+      size_factor: 0.50
+    BEAR_TREND:
+      min_score: 999
+      size_factor: 0.0
+
+  # ── ML integration ─────────────────────────────────────────────────
+  ml:
+    enabled: false                 # Set true after training model
+    min_confidence: 0.55           # Minimum win probability to allow trade
+    confidence_weight: 0.4         # Weight of ML score vs rule-based score
+    features_version: "v1"
+
+# ── Scoring weights ────────────────────────────────────────────────────
+scoring:
+  rsi_weight: 25           # Max points for RSI positioning
+  macd_weight: 25          # Max points for MACD strength
+  volume_weight: 25        # Max points for volume spike
+  trend_weight: 25         # Max points for EMA/trend alignment
+  # Bonus points (added on top of 100)
+  golden_cross_bonus: 5    # Extra points if fresh golden cross
+  vol_3x_bonus: 5          # Extra points if volume > 3× average

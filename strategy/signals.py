@@ -21,6 +21,7 @@ def generate_signals(
     indicators: dict,           # {symbol: ind_dict}
     open_positions: List[Position],
     held_symbols: set,
+    market_bullish: bool = True,
 ) -> tuple[List[Signal], List[Position]]:
     """
     Returns:
@@ -72,6 +73,11 @@ def generate_signals(
 
     # ── STEP 2: Screen candidates for BUY ────────────────────────────────
     buy_candidates: List[Signal] = []
+
+    if not market_bullish:
+        logger.info(f"[Signals] {today}: Market in BEAR regime — no new BUY signals")
+        signals.extend(buy_candidates)
+        return signals, updated_positions
 
     for symbol, ind in indicators.items():
         if symbol in held_symbols:
