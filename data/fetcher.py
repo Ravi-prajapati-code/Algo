@@ -11,6 +11,10 @@ from typing import List, Optional
 import pandas as pd
 import yfinance as yf
 
+# Suppress yfinance's internal error/warning logs — our fetcher handles
+# failures gracefully and logs its own clean warnings instead.
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
 from config.settings import LOOKBACK_DAYS
 from db import repository as repo
 
