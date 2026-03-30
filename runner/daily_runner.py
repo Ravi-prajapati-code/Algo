@@ -22,13 +22,14 @@ from datetime import date
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from db.repository import init_db, load_open_positions, load_snapshots, save_signal
-from data.fetcher import fetch_all
+from data.fetcher import fetch_all, fetch_index
 from data.universe import get_all_symbols
 from indicators.composite import compute_all
 from strategy.signals import generate_signals
+from strategy.market_filter import is_market_bullish
 from portfolio.manager import PortfolioManager
 from runner.signal_output import write_signals, write_portfolio_state
-from config.settings import INITIAL_CAPITAL
+from config.settings import INITIAL_CAPITAL, MARKET_INDEX_SYMBOL, MARKET_FILTER_SMA
 
 logging.basicConfig(
     level=logging.INFO,
@@ -61,13 +62,18 @@ def run(today: date = None):
     indicators = compute_all(data)
     logger.info(f"Indicators computed for {len(indicators)} symbols")
 
-    # 4. Load open positions
+    # 4. Market regime filter
+    index_df = fetch_index(MARKET_INDEX_SYMBOL, lookback_days=MARKET_FILTER_SMA + 50)
+    market_bullish = is_market_bullish(index_df)
+
+    # 5. Load open positions
     open_positions = load_open_positions()
     held_symbols = {pos.symbol for pos in open_positions}
 
-    # 5 & 6. Generate signals
+    # 6. Generate signals
     signals, updated_positions = generate_signals(
-        today, indicators, open_positions, held_symbols
+        today, indicators, open_positions, held_symbols,
+        market_bullish=market_bullish
     )
 
     # 7. Process signals through portfolio manager

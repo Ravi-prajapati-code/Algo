@@ -99,3 +99,14 @@ def get_latest_price(symbol: str) -> Optional[float]:
     if df.empty:
         return None
     return float(df["close"].iloc[-1])
+
+
+def fetch_index(symbol: str = "^NSEI", lookback_days: int = 250) -> pd.DataFrame:
+    """
+    Fetch index OHLCV (e.g. Nifty 50 ^NSEI) without caching to DB.
+    Used only for market regime filter — not a tradeable instrument.
+    """
+    today = date.today()
+    start = today - timedelta(days=lookback_days + 30)
+    df = _fetch_raw(symbol, start, today + timedelta(days=1))
+    return df.sort_index() if not df.empty else pd.DataFrame()

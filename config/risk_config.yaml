@@ -1,0 +1,70 @@
+# ============================================================
+# Risk Management Configuration
+# All risk parameters in one place for easy tuning.
+# ============================================================
+
+portfolio:
+  initial_capital: 75000          # Starting capital in ₹
+  currency: "INR"
+  max_open_positions: 15          # Hard limit on concurrent positions
+  max_new_trades_per_day: 5       # Max new entries per trading day
+  cash_reserve_pct: 0.10          # Keep 10% cash as buffer at all times
+
+# ── Per-trade risk limits ──────────────────────────────────────────────
+per_trade:
+  max_risk_pct: 0.02              # Risk max 2% of portfolio per trade
+  atr_stop_multiplier: 1.5        # Stop = ATR × 1.5 (ATR method)
+  min_risk_reward: 2.0            # Only take trades with R:R ≥ 2:1
+
+# ── Allocation caps ────────────────────────────────────────────────────
+allocation:
+  max_stock_pct: 0.20             # Max 20% portfolio in single stock
+  max_sector_pct: 0.30            # Max 30% portfolio in single sector
+  min_cash_reserve: 0.05          # Always keep 5% cash (hard floor)
+
+# ── Drawdown protection ────────────────────────────────────────────────
+drawdown:
+  kill_switch_pct: 0.15           # 15% DD from peak → halt all new buys
+  reduce_size_pct: 0.10           # 10% DD → cut position size by 50%
+  alert_pct: 0.08                 # 8% DD → send Telegram alert
+  recovery_threshold_pct: 0.05   # DD must fall below 5% to re-enable
+
+# ── Sector limits ──────────────────────────────────────────────────────
+sector_caps:
+  Banking: 0.30
+  IT: 0.25
+  FMCG: 0.25
+  Pharma: 0.25
+  Auto: 0.20
+  Energy: 0.20
+  Metals: 0.20
+  Infra: 0.20
+  Chemicals: 0.20
+  Telecom: 0.15
+  RealEstate: 0.15
+  Aviation: 0.15
+  Consumer: 0.25
+  Retail: 0.20
+  default: 0.30                   # Default cap for any sector not listed
+
+# ── Volatility-based sizing ────────────────────────────────────────────
+volatility:
+  sizing_method: "atr"            # 'atr' | 'fixed_pct'
+  fixed_stop_pct: 0.06            # Only used when sizing_method = 'fixed_pct'
+  atr_period: 14
+  max_slippage_pct: 0.005         # Hard cap on slippage allowance
+
+# ── Circuit breakers ───────────────────────────────────────────────────
+circuit_breakers:
+  max_consecutive_losses: 5       # Pause after 5 consecutive losing trades
+  max_daily_loss_pct: 0.03        # Stop for day if portfolio drops 3% in one day
+  min_win_rate_rolling: 0.30      # Alert if 30-day win rate drops below 30%
+
+# ── Backtest acceptance criteria ───────────────────────────────────────
+backtest_criteria:
+  min_cagr: 0.15                  # 15% annual return
+  min_sharpe: 0.80                # Sharpe ratio ≥ 0.8
+  max_drawdown: 0.25              # Max drawdown ≤ 25%
+  min_win_rate: 0.42              # Win rate ≥ 42%
+  min_profit_factor: 1.40         # Profit factor ≥ 1.4
+  min_trades: 30                  # Minimum 30 trades for statistical validity

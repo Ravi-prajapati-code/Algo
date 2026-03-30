@@ -20,13 +20,48 @@ def _connect() -> sqlite3.Connection:
 
 
 def init_db():
-    """Create all tables from schema.sql if they don't exist."""
+    """Create all tables and indexes from schema.sql if they don't exist."""
     schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
     with open(schema_path) as f:
         sql = f.read()
     with _connect() as conn:
         conn.executescript(sql)
+    _migrate_db()
     print(f"[DB] Initialized: {DATA_CACHE_DB}")
+
+
+def _migrate_db():
+    """
+    Apply incremental schema migrations for new columns added in v2.
+    Safe to run multiple times (ALTER TABLE IF NOT EXISTS equivalent via try/except).
+    """
+    migrations = [
+        # positions — new risk metadata columns
+        "ALTER TABLE positions ADD COLUMN atr_at_entry  REAL",
+        "ALTER TABLE positions ADD COLUMN ml_confidence REAL",
+        "ALTER TABLE positions ADD COLUMN regime        TEXT",
+        "ALTER TABLE positions ADD COLUMN risk_score    REAL",
+        "ALTER TABLE positions ADD COLUMN sizing_method TEXT",
+        # trades — new execution metadata
+        "ALTER TABLE trades ADD COLUMN slippage_pct  REAL",
+        "ALTER TABLE trades ADD COLUMN fill_type     TEXT",
+        "ALTER TABLE trades ADD COLUMN regime        TEXT",
+        "ALTER TABLE trades ADD COLUMN ml_confidence REAL",
+        # signals — ML and regime
+        "ALTER TABLE signals ADD COLUMN ml_win_prob   REAL",
+        "ALTER TABLE signals ADD COLUMN ml_exp_return REAL",
+        "ALTER TABLE signals ADD COLUMN regime        TEXT",
+        # portfolio_snapshots — risk state
+        "ALTER TABLE portfolio_snapshots ADD COLUMN drawdown_pct REAL DEFAULT 0",
+        "ALTER TABLE portfolio_snapshots ADD COLUMN regime       TEXT",
+        "ALTER TABLE portfolio_snapshots ADD COLUMN kill_switch  INTEGER DEFAULT 0",
+    ]
+    with _connect() as conn:
+        for sql in migrations:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # Column already exists — skip
 
 
 # ─── OHLCV CACHE ─────────────────────────────────────────────────────────────
@@ -180,6 +215,21 @@ def _row_to_signal(row: sqlite3.Row) -> Signal:
         reason=row["reason"] or "",
         indicators=json.loads(row["indicators_json"] or "{}"),
     )
+
+
+# ─── RISK EVENTS ─────────────────────────────────────────────────────────────
+
+def save_risk_event(event_type: str, description: str, portfolio_value: float = 0.0,
+                    drawdown_pct: float = 0.0, metadata: dict = None):
+    """Persist a risk event (kill switch, drawdown alert, API error, etc.)."""
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO risk_events
+               (event_type, description, portfolio_value, drawdown_pct, metadata_json)
+               VALUES (?,?,?,?,?)""",
+            (event_type, description, portfolio_value, drawdown_pct,
+             json.dumps(metadata or {}))
+        )
 
 
 # ─── PORTFOLIO SNAPSHOTS ─────────────────────────────────────────────────────
