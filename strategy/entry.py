@@ -29,10 +29,10 @@ def check_entry(ind: dict) -> tuple[bool, str]:
     if not (RSI_BUY_MIN <= rsi <= RSI_BUY_MAX):
         return False, f"RSI {rsi:.1f} outside buy zone [{RSI_BUY_MIN}, {RSI_BUY_MAX}]"
 
-    # 4. MACD bullish confirmation — histogram must be BOTH positive AND rising
-    # (OR was too loose: accepted declining-but-positive or negative-but-rising setups)
-    if not (ind.get("macd_bullish") and ind.get("macd_turning_up")):
-        return False, f"MACD not bullish+rising (hist={ind['macd_hist']:.4f}, prev={ind['macd_hist_prev']:.4f})"
+    # 4. MACD bullish confirmation — positive OR turning up from negative
+    # (AND was too restrictive: cut trades from 154→58 and CAGR from 18.9%→12.4%)
+    if not ind.get("macd_bullish") and not ind.get("macd_turning_up"):
+        return False, f"MACD not bullish (hist={ind['macd_hist']:.4f}, prev={ind['macd_hist_prev']:.4f})"
 
     # 5. Volume confirmation
     if not ind.get("vol_spike"):
