@@ -94,21 +94,21 @@ class TestEntryConditions:
         ))
         assert ok is False
 
-    def test_macd_bullish_but_not_rising_fails(self):
-        # AND logic: positive histogram that's declining should now fail
+    def test_macd_bullish_not_rising_still_passes(self):
+        # OR logic: positive histogram even if not rising is acceptable
         ok, _ = check_entry(_make_ind(
             macd_bullish=True, macd_turning_up=False,
-            macd_hist=0.2, macd_hist_prev=0.5   # falling histogram
+            macd_hist=0.2, macd_hist_prev=0.5
         ))
-        assert ok is False
+        assert ok is True
 
-    def test_macd_rising_but_negative_fails(self):
-        # AND logic: rising histogram that's still negative should fail
+    def test_macd_rising_but_negative_passes(self):
+        # OR logic: turning up from negative is acceptable (momentum shift)
         ok, _ = check_entry(_make_ind(
             macd_bullish=False, macd_turning_up=True,
-            macd_hist=-0.1, macd_hist_prev=-0.5  # rising but negative
+            macd_hist=-0.1, macd_hist_prev=-0.5
         ))
-        assert ok is False
+        assert ok is True
 
     def test_price_below_bb_lower_fails(self):
         ok, _ = check_entry(_make_ind(above_bb_lower=False))

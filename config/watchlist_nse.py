@@ -41,7 +41,7 @@ WATCHLIST = [
 
     # ── AUTOMOBILES ────────────────────────────────────────────────────
     ("MARUTI.NS",      "Auto",          "Maruti Suzuki"),
-    ("TATAMOTORS.NS",  "Auto",          "Tata Motors"),
+    ("TATAPOWER.NS",   "Energy",        "Tata Power"),
     ("M&M.NS",         "Auto",          "Mahindra & Mahindra"),
     ("BAJAJ-AUTO.NS",  "Auto",          "Bajaj Auto"),
     ("EICHERMOT.NS",   "Auto",          "Eicher Motors"),
