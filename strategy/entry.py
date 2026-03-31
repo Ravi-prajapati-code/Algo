@@ -1,30 +1,35 @@
 """
-Multi-layer entry validator.
+Multi-layer entry validator with three distinct entry strategies.
 
-A trade is only opened when ALL five layers pass.  Each layer targets a
-different risk — missing any one of them is a known reason trades fail.
+A trade is opened when regime + RS/quality gates pass AND at least one
+of three technical setups is confirmed:
 
-Layer 1 — Market regime (macro filter)
-  The broad market must be in BULL, SIDEWAYS, or HIGH_VOL.
-  Checked externally (backtest/engine.py, daily_runner.py) before entry.py
-  is called; entry.py receives regime as a parameter and enforces the gate.
+  BREAKOUT       — Golden cross / price breaking above EMA20 with volume spike
+  PULLBACK       — Price retesting EMA20 in an uptrend (mean-reversion entry)
+  TREND_CONT     — Trend continuation in strong uptrend with MACD confirmation
 
-Layer 2 — Relative Strength (momentum quality)
-  Stock must be outperforming Nifty over 3 months (rs_ratio ≥ 1.0)
-  AND in the top 60 % of the watchlist by RS rank.
-  This prevents buying laggards that look cheap but are being distributed.
+Separating the three strategies prevents over-filtering: a pullback entry
+does not need a volume spike (pullbacks have naturally lower volume), and a
+trend-continuation entry does not need a golden cross.
 
-Layer 3 — Quality filter (fundamental safety)
-  Stock must be in quality Tier 1 or 2 (no speculative names in strict mode).
-  Extreme BB width (>25 %) is also blocked regardless of tier.
+Layer 1 — Market regime gate
+  Blocks BEAR_TREND and UNKNOWN.  SIDEWAYS is allowed (reduced position size
+  applied by the caller via regime_position_factor).
 
-Layer 4 — Technical setup (timing)
-  EMA trend, RSI zone, MACD confirmation, volume spike, BB position.
-  Same logic as before, unchanged.
+Layer 2 — Relative Strength (relaxed thresholds)
+  Hard-blocks only if stock is > 10 % below index (rs_ratio < 0.90) or
+  in the bottom 30th percentile of the watchlist.
+  Slightly-underperforming stocks (0.90–1.00) that have strong technical
+  setups are allowed through — this captures early RS turnarounds.
 
-Layer 5 — Breakout / momentum confirmation
-  Price must be above the 20-day EMA AND near (within 3 %) a local high,
-  or have a recent golden cross.  Prevents buying in the middle of nowhere.
+Layer 3 — Quality filter
+  Tier and extreme-BB-width check (unchanged).
+
+Layer 4 — Entry strategy detection
+  One of BREAKOUT / PULLBACK / TREND_CONT must match.
+
+Layer 5 — Not in active breakdown
+  Price must be above lower Bollinger Band.
 """
 
 import logging
@@ -33,6 +38,10 @@ from strategy.quality_filter import passes_quality_filter, MIN_QUALITY_TIER
 
 logger = logging.getLogger(__name__)
 
+# RS hard-block thresholds (Layer 2)
+_RS_HARD_BLOCK_RATIO = 0.90    # Only block if > 10 % below index
+_RS_MIN_RANK         = 30.0    # Lowered from 40 for more trade opportunities
+
 
 def check_entry(
     ind: dict,
@@ -40,38 +49,39 @@ def check_entry(
     regime: str = "BULL_TREND",
 ) -> tuple[bool, str]:
     """
-    Run all five entry layers.
+    Run all entry layers.
 
     Parameters
     ----------
-    ind    : Indicator dict (from compute_indicators, enriched with RS/quality fields).
+    ind    : Indicator dict enriched with RS/quality fields.
     symbol : Stock symbol — used for quality tier lookup and logging.
     regime : Current market regime string.
 
     Returns
     -------
     (qualified: bool, reason: str)
-    reason = first failed layer, or 'All entry conditions met' on pass.
+    reason = first failed layer, or entry strategy name on pass.
     """
 
     # ── Layer 1: Market regime gate ───────────────────────────────────────
     if regime in ("BEAR_TREND", "UNKNOWN"):
         return False, f"Market regime {regime} — new entries blocked"
 
-    # ── Layer 2: Relative Strength ────────────────────────────────────────
+    # ── Layer 2: Relative Strength (relaxed) ─────────────────────────────
     rs_ratio = float(ind.get("rs_ratio", 0) or 0)
     rs_rank  = float(ind.get("rs_rank",  0) or 0)
 
-    if rs_ratio > 0:   # Only enforce when RS data is available
-        if not ind.get("rs_outperforming", True):
+    if rs_ratio > 0:
+        # Hard-block only when stock is significantly lagging the index
+        if rs_ratio < _RS_HARD_BLOCK_RATIO:
             return False, (
-                f"RS below index: rs_ratio={rs_ratio:.3f} < 1.0 — "
-                "stock underperforming Nifty"
+                f"RS significantly below index: rs_ratio={rs_ratio:.3f} "
+                f"< {_RS_HARD_BLOCK_RATIO:.2f} — stock clearly underperforming Nifty"
             )
-        if not ind.get("rs_qualified", True):
+        if rs_rank < _RS_MIN_RANK:
             return False, (
                 f"RS rank too low: {rs_rank:.0f}th percentile "
-                "(need ≥ 40th) — relative weakness vs watchlist"
+                f"(need ≥ {_RS_MIN_RANK:.0f}th) — relative weakness vs watchlist"
             )
 
     # ── Layer 3: Quality filter ───────────────────────────────────────────
@@ -80,66 +90,106 @@ def check_entry(
         if not passes:
             return False, f"Quality filter: {reason}"
 
-    # ── Layer 4: Technical setup ──────────────────────────────────────────
+    # ── Layer 4: Entry strategy detection ────────────────────────────────
+    entry_type, tech_reason = _detect_entry_strategy(ind)
+    if not entry_type:
+        return False, tech_reason
 
-    # 4a. Uptrend: EMA20 > EMA50
-    if not ind.get("uptrend"):
-        return False, (
-            f"No uptrend (EMA20={ind.get('ema_fast', 0):.2f} "
-            f"< EMA50={ind.get('ema_slow', 0):.2f})"
-        )
-
-    # 4b. Recent golden cross OR pullback to EMA20
-    price    = ind.get("close", 0)
-    ema_fast = ind.get("ema_fast", price) or price
-    near_ema = ema_fast > 0 and abs(price - ema_fast) / ema_fast <= 0.02
-    if not ind.get("golden_cross") and not near_ema:
-        return False, (
-            f"No recent golden cross and price not near EMA20 "
-            f"(price={price:.2f}, EMA20={ema_fast:.2f})"
-        )
-
-    # 4c. RSI in buy zone
-    rsi = ind.get("rsi", 0)
-    if not (RSI_BUY_MIN <= rsi <= RSI_BUY_MAX):
-        return False, f"RSI {rsi:.1f} outside buy zone [{RSI_BUY_MIN}, {RSI_BUY_MAX}]"
-
-    # 4d. MACD bullish OR turning up
-    if not ind.get("macd_bullish") and not ind.get("macd_turning_up"):
-        return False, (
-            f"MACD not bullish "
-            f"(hist={ind.get('macd_hist', 0):.4f}, "
-            f"prev={ind.get('macd_hist_prev', 0):.4f})"
-        )
-
-    # 4e. Volume spike
-    if not ind.get("vol_spike"):
-        return False, f"No volume spike (ratio={ind.get('vol_ratio', 0):.2f}x)"
-
-    # 4f. Price above lower Bollinger Band
+    # ── Layer 5: Not in active breakdown ─────────────────────────────────
     if not ind.get("above_bb_lower"):
+        price  = ind.get("close", 0)
+        bb_low = ind.get("bb_lower", 0)
         return False, (
-            f"Price below lower BB "
-            f"(price={price:.2f}, BB_lower={ind.get('bb_lower', 0):.2f})"
+            f"Price {price:.2f} below lower BB {bb_low:.2f} — breakdown risk"
         )
 
-    # ── Layer 5: Breakout / momentum confirmation ─────────────────────────
-    # Price must be above EMA20 (not just near it) for momentum confirmation
-    if price <= ema_fast * 0.99:
-        return False, (
-            f"No breakout confirmation: price {price:.2f} not above "
-            f"EMA20 {ema_fast:.2f}"
-        )
+    return True, f"Entry ({entry_type}): conditions met"
 
-    # 52-week high proximity: stock must be within 25 % of its 52W high
-    # (avoids buying deeply broken stocks with a dead-cat bounce)
-    week52_hi = ind.get("week52_high", 0)
-    if week52_hi and week52_hi > 0:
-        proximity = price / week52_hi
-        if proximity < 0.75:
-            return False, (
-                f"Price {price:.2f} is {proximity:.1%} of 52W high "
-                f"{week52_hi:.2f} — too far from highs (< 75 %)"
-            )
 
-    return True, "All entry conditions met"
+def _detect_entry_strategy(ind: dict) -> tuple[str | None, str]:
+    """
+    Detect which of three entry strategies is active.
+
+    Returns (strategy_name, description) or (None, rejection_reason).
+
+    Strategy 1 — BREAKOUT
+    ---------------------
+    Fresh golden cross OR strong price breakout above EMA20.
+    Requires: volume spike + RSI in buy zone + MACD not strongly bearish.
+    Best for: early-trend entries after a crossover event.
+
+    Strategy 2 — PULLBACK
+    ----------------------
+    Uptrend intact + price pulling back to EMA20 (within 3 %).
+    Requires: RSI recovering (40–60) + MACD turning up or bullish.
+    No volume spike needed — pullbacks naturally have lower volume.
+    Best for: adding to winning trends at lower-risk re-entry points.
+
+    Strategy 3 — TREND CONTINUATION
+    --------------------------------
+    Strong uptrend + price above EMA20 + RSI in momentum zone (50–65).
+    Requires: MACD positive + moderate volume increase (≥ 1.2×).
+    Best for: steady uptrending stocks with consistent momentum.
+    """
+    price     = float(ind.get("close",    0) or 0)
+    ema_fast  = float(ind.get("ema_fast", price) or price) or (price or 1)
+    rsi       = float(ind.get("rsi",      50) or 50)
+    vol_ratio = float(ind.get("vol_ratio", 1.0) or 1.0)
+
+    # Price within 3 % of EMA20 (pullback zone)
+    near_ema20 = ema_fast > 0 and abs(price - ema_fast) / ema_fast <= 0.03
+
+    # MACD is not strongly bearish (histogram not deep negative without recovery)
+    macd_hist       = float(ind.get("macd_hist", 0) or 0)
+    macd_not_tanking = (
+        ind.get("macd_bullish")
+        or ind.get("macd_turning_up")
+        or macd_hist > -0.15
+    )
+
+    # ── Strategy 1: BREAKOUT ──────────────────────────────────────────────
+    if (
+        ind.get("golden_cross")
+        and price >= ema_fast * 0.99
+        and ind.get("vol_spike")
+        and RSI_BUY_MIN <= rsi <= RSI_BUY_MAX
+        and macd_not_tanking
+    ):
+        return "BREAKOUT", "Golden cross breakout with volume confirmation"
+
+    # ── Strategy 2: PULLBACK ──────────────────────────────────────────────
+    if (
+        ind.get("uptrend")
+        and near_ema20
+        and RSI_BUY_MIN <= rsi <= 60
+        and (ind.get("macd_turning_up") or ind.get("macd_bullish"))
+    ):
+        return "PULLBACK", "Pullback to EMA20 in uptrend with MACD support"
+
+    # ── Strategy 3: TREND CONTINUATION ───────────────────────────────────
+    if (
+        ind.get("uptrend")
+        and price > ema_fast * 1.005       # Price clearly above EMA20
+        and 50 <= rsi <= RSI_BUY_MAX
+        and ind.get("macd_bullish")
+        and vol_ratio >= 1.2               # Some volume increase (not full spike)
+    ):
+        return "TREND_CONT", "Trend continuation with MACD and volume"
+
+    # ── No strategy matched — build a useful rejection reason ─────────────
+    reasons: list[str] = []
+    if not ind.get("uptrend") and not ind.get("golden_cross"):
+        reasons.append("no uptrend / golden cross")
+    if not (RSI_BUY_MIN <= rsi <= RSI_BUY_MAX):
+        reasons.append(f"RSI {rsi:.0f} outside [{RSI_BUY_MIN}–{RSI_BUY_MAX}]")
+    if not ind.get("macd_bullish") and not ind.get("macd_turning_up") and macd_hist <= -0.15:
+        reasons.append(f"MACD bearish (hist={macd_hist:.3f})")
+    if not ind.get("vol_spike") and vol_ratio < 1.2:
+        reasons.append(f"low volume ({vol_ratio:.1f}×)")
+    if not near_ema20 and price <= ema_fast * 1.005:
+        reasons.append("price not near / above EMA20")
+
+    msg = "No entry strategy matched"
+    if reasons:
+        msg += ": " + ", ".join(reasons)
+    return None, msg

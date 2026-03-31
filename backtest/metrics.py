@@ -14,7 +14,29 @@ def calculate_metrics(result: BacktestResult, initial_capital: float = INITIAL_C
     equity = result.equity_curve
 
     if not equity:
-        return {"error": "No equity data"}
+        return {
+            "error":                    "No equity data",
+            "initial_capital":          round(initial_capital, 2),
+            "final_value":              round(initial_capital, 2),
+            "total_return_pct":         0.0,
+            "cagr_pct":                 0.0,
+            "max_drawdown_pct":         0.0,
+            "sharpe_ratio":             0.0,
+            "total_trades":             0,
+            "win_rate_pct":             0.0,
+            "avg_win_inr":              0.0,
+            "avg_loss_inr":             0.0,
+            "avg_hold_days":            0.0,
+            "profit_factor":            0.0,
+            "total_charges_inr":        0.0,
+            "annual_charges_drag_pct":  0.0,
+            "passes_15pct_target":      False,
+            "passes_sharpe":            False,
+            "passes_drawdown":          True,
+            "passes_win_rate":          False,
+            "passes_profit_factor":     False,
+            "all_criteria_met":         False,
+        }
 
     dates = sorted(equity.keys())
     values = [equity[d] for d in dates]

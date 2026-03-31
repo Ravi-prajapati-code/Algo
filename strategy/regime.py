@@ -161,7 +161,7 @@ def regime_min_score(regime: Regime) -> float:
     """
     return {
         "BULL_TREND": 40.0,
-        "SIDEWAYS":   55.0,
+        "SIDEWAYS":   50.0,   # Lowered from 55 — good setups still allowed
         "HIGH_VOL":   70.0,
         "BEAR_TREND": 999.0,
         "UNKNOWN":    999.0,
