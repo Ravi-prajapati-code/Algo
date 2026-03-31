@@ -36,8 +36,8 @@ logger = logging.getLogger(__name__)
 # ── Configuration ──────────────────────────────────────────────────────────
 RS_PRIMARY_LOOKBACK   = 63    # ~3-month return comparison
 RS_SECONDARY_LOOKBACK = 21    # ~1-month return for recency check
-RS_MIN_RATIO          = 1.0   # Stock must match or beat index
-RS_MIN_RANK           = 40.0  # Minimum percentile rank within watchlist (0–100)
+RS_MIN_RATIO          = 1.0   # Stock must match or beat index (used for rs_outperforming flag)
+RS_MIN_RANK           = 30.0  # Minimum percentile rank within watchlist (lowered from 40)
 RS_MIN_DATA_BARS      = 70    # Minimum bars needed to compute RS reliably
 
 
@@ -154,7 +154,7 @@ def compute_rs_for_all(
 
     qualified = sum(1 for m in raw.values() if m.get("rs_qualified"))
     logger.info(
-        "[RS] Computed for %d symbols — %d pass RS filter (ratio≥%.1f, rank≥%.0f)",
+        "[RS] Computed for %d symbols — %d qualify (ratio≥%.2f outperforming, rank≥%.0f)",
         len(raw), qualified, RS_MIN_RATIO, RS_MIN_RANK,
     )
     return raw

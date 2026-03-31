@@ -94,14 +94,23 @@ class TestEntryConditions:
         ok, _ = check_entry(_make_ind(rsi=65.0))
         assert ok is True
 
-    def test_no_volume_fails(self):
-        ok, _ = check_entry(_make_ind(vol_spike=False, vol_ratio=1.0))
+    def test_no_momentum_fails(self):
+        # No golden cross, no MACD support, no volume — all three strategies fail
+        ok, _ = check_entry(_make_ind(
+            golden_cross=False,
+            macd_bullish=False, macd_turning_up=False,
+            macd_hist=-0.5, macd_hist_prev=0.0,
+            vol_spike=False, vol_ratio=0.8,
+        ))
         assert ok is False
 
     def test_macd_not_bullish_no_turn_fails(self):
+        # Deep-negative MACD (hist=-0.5) with no golden cross — BREAKOUT blocked,
+        # PULLBACK blocked (no macd support), TREND_CONT blocked (no macd_bullish)
         ok, _ = check_entry(_make_ind(
+            golden_cross=False,
             macd_bullish=False, macd_turning_up=False,
-            macd_hist=-0.5, macd_hist_prev=0.0
+            macd_hist=-0.5, macd_hist_prev=0.0,
         ))
         assert ok is False
 
