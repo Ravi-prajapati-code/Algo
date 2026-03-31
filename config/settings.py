@@ -25,7 +25,7 @@ CURRENCY  = "INR"
 # PORTFOLIO
 # ──────────────────────────────────────────────
 INITIAL_CAPITAL         = float(os.getenv("INITIAL_CAPITAL") or 75000)
-MAX_OPEN_POSITIONS      = int(os.getenv("MAX_OPEN_POSITIONS") or 10)
+MAX_OPEN_POSITIONS      = int(os.getenv("MAX_OPEN_POSITIONS") or 5)    # Max concurrent positions (focus on best 5)
 MAX_NEW_TRADES_PER_DAY  = int(os.getenv("MAX_NEW_TRADES_PER_DAY") or 3)
 MAX_SELECTED_STOCKS     = int(os.getenv("MAX_SELECTED_STOCKS") or 5)   # Top N ranked stocks per day
 MAX_STOCK_ALLOCATION_PCT    = 0.20   # Max 20 % portfolio in any single stock

@@ -18,6 +18,8 @@ class Position:
     peak_price: float
     status: str = "OPEN"
     id: Optional[int] = None
+    # Capital tracking — set when position is opened
+    portfolio_value_at_entry: Optional[float] = None   # Total portfolio value at entry time
 
     @property
     def current_value(self) -> float:
@@ -45,6 +47,10 @@ class Trade:
     exit_reason: Optional[str] = None
     hold_days: Optional[int] = None
     id: Optional[int] = None
+    # Capital tracking fields (populated by backtester)
+    portfolio_value_at_entry: Optional[float] = None   # Portfolio value when trade was opened
+    capital_used_inr: Optional[float] = None           # Cash deployed (entry_price × shares)
+    capital_used_pct: Optional[float] = None           # capital_used_inr / portfolio_value_at_entry × 100
 
 
 @dataclass
