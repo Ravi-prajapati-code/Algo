@@ -51,8 +51,10 @@ def _make_ind(**overrides) -> dict:
         "rs_qualified":     True,
         # Quality field (hybrid model)
         "quality_score_val": 18.0,
+        # Price context (20-day high above close → not yet at breakout)
+        "high_20d":         105.0,
         # 52-week context
-        "week52_high":      105.0,
+        "week52_high":      110.0,
     }
     base.update(overrides)
     return base
@@ -87,7 +89,8 @@ class TestEntryConditions:
         assert ok is False
 
     def test_rsi_at_boundary_min(self):
-        ok, _ = check_entry(_make_ind(rsi=40.0))
+        # RSI=40 (RSI_BUY_MIN) qualifies for BREAKOUT when price is at 20-day high
+        ok, _ = check_entry(_make_ind(rsi=40.0, high_20d=100.0))
         assert ok is True
 
     def test_rsi_at_boundary_max(self):
@@ -149,7 +152,9 @@ class TestExitConditions:
         assert "TAKE_PROFIT" in reason
 
     def test_trailing_stop_triggers(self):
-        pos = _make_position(trailing_stop=97.0)
+        # entry=90 → 2% hard stop = 90-max(1.8,3.0)=87 (well below price=96)
+        # trailing_stop=97 > price=96 → trailing stop triggers, not hard stop
+        pos = _make_position(entry_price=90.0, peak_price=100.0, trailing_stop=97.0)
         ok, reason = check_exit(pos, 96.0, _make_ind())
         assert ok is True
         assert "TRAILING" in reason

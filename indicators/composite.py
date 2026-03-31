@@ -70,6 +70,10 @@ def compute_indicators(
         last_high  = float(df["high"].iloc[-1])
         last_low   = float(df["low"].iloc[-1])
 
+        # ── 20-day high (breakout reference level) ────────────────────────
+        lookback_20  = df["high"].tail(20)
+        high_20d     = round(float(lookback_20.max()), 2) if len(lookback_20) >= 20 else round(last_high, 2)
+
         # ── 52-week high ──────────────────────────────────────────────────
         lookback_252 = df["high"].tail(252)
         week52_high  = round(float(lookback_252.max()), 2) if len(lookback_252) >= 50 else 0.0
@@ -137,7 +141,8 @@ def compute_indicators(
             "vol_ratio":          volume["vol_ratio"],
             "vol_spike":          volume["vol_spike"],
             "vol_increasing":     volume["vol_increasing"],
-            # ── 52-week context ────────────────────────────────────────
+            # ── price context ──────────────────────────────────────────
+            "high_20d":           high_20d,
             "week52_high":        week52_high,
             # ── relative strength ──────────────────────────────────────
             "rs_ratio":           round(rs_ratio, 4),

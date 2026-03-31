@@ -12,7 +12,24 @@ Critical design rules:
   NEXT candle open    — buy/sell executes at tomorrow's open
   SLIPPAGE applied    — realistic execution prices via backtest/slippage.py
   MARKET REGIME       — Nifty 50 filter blocks buys in bear markets
-  REGIME DETECTION    — multi-regime (BULL/BEAR/SIDEWAYS/HIGH_VOL) modulation
+  REGIME DETECTION    — multi-regime (BULL/BEAR/SIDEWAYS/HIGH_VOL/PARTIAL) modulation
+  STOCK RANKING       — only top N ranked stocks selected per day
+  DAILY DEBUG LOG     — full scan/selection visibility per trading day
+
+Daily Debug Output (every trading day):
+  ┌────────────────────────────────────────────────────────────┐
+  │ [Day] 2024-03-15  regime=BULL_TREND  capital=₹82,350       │
+  │ [Scan] total=45  rs_pass=22  signals=8  selected=3         │
+  │ [Decision] RELIANCE   RS=PASS  signal=YES  rank=87.2  → SELECTED
+  │ [Decision] TCS        RS=PASS  signal=YES  rank=76.1  → SELECTED
+  │ [Decision] WIPRO      RS=PASS  signal=YES  rank=65.4  → SKIPPED (limit)
+  │ [Rejected] HDFCBANK   reason=Quality filter: tier below minimum
+  └────────────────────────────────────────────────────────────┘
+
+Dynamic Filter Relaxation:
+  If zero candidates pass the score threshold, min_score is reduced by 10 pts
+  (floor: 30) and the scan retries once.  This ensures minimum trade frequency
+  without permanently lowering quality standards.
 """
 
 import logging
@@ -23,7 +40,7 @@ import pandas as pd
 
 from config.settings import (
     INITIAL_CAPITAL, LOOKBACK_DAYS, MARKET_INDEX_SYMBOL,
-    SLIPPAGE_MODEL, PARTIAL_FILL_ENABLED,
+    SLIPPAGE_MODEL, PARTIAL_FILL_ENABLED, MAX_SELECTED_STOCKS,
 )
 from indicators.composite import compute_indicators
 from strategy.signals import generate_signals
@@ -32,6 +49,7 @@ from strategy.exit import update_trailing_stop, check_exit, initial_stops
 from strategy.relative_strength import compute_rs_for_all
 from strategy.scoring import score_signal, score_to_size_factor
 from strategy.quality_filter import tier_size_factor
+from strategy.stock_ranker import rank_and_select, compute_rank_score, build_decision_log
 from backtest.slippage import apply_slippage, simulate_partial_fill
 from charges.calculator import net_pnl as calc_net_pnl, buy_charges
 from portfolio.sizer import calculate_shares, position_value
@@ -43,13 +61,19 @@ from db.models import Position, Trade
 
 logger = logging.getLogger(__name__)
 
+# Minimum score floor for dynamic relaxation (never go below this)
+_DYNAMIC_RELAX_MIN_SCORE = 30.0
+_DYNAMIC_RELAX_STEP      = 10.0
+
 
 class BacktestResult:
     def __init__(self):
-        self.trades: list[Trade]            = []
+        self.trades: list[Trade]             = []
         self.equity_curve: dict[date, float] = {}
         self.cash_curve:   dict[date, float] = {}
         self.regime_log:   dict[date, str]   = {}   # {date: regime}
+        self.daily_scan_log: list[dict]      = []   # Daily scan summaries
+        self.decision_log:   list[dict]      = []   # Per-stock decisions
 
 
 class BacktestEngine:
@@ -62,6 +86,12 @@ class BacktestEngine:
     - Orders executed at tomorrow's open (next bar) to avoid lookahead.
     - Slippage applied on top of next-bar open (configurable model).
     - Partial fills simulated based on average daily volume.
+
+    Stock Selection
+    ---------------
+    - All qualifying stocks are ranked by composite score.
+    - Only top MAX_SELECTED_STOCKS enter the execution pipeline.
+    - Full decision log written for every scanned symbol.
 
     Usage
     -----
@@ -78,14 +108,16 @@ class BacktestEngine:
         lookback: int = LOOKBACK_DAYS,
         slippage_model: str = SLIPPAGE_MODEL,
         use_partial_fills: bool = PARTIAL_FILL_ENABLED,
+        max_selected: int = MAX_SELECTED_STOCKS,
     ):
-        self.data            = data
-        self.start           = start_date
-        self.end             = end_date
-        self.initial_capital = initial_capital
-        self.lookback        = lookback
-        self.slippage_model  = slippage_model
+        self.data              = data
+        self.start             = start_date
+        self.end               = end_date
+        self.initial_capital   = initial_capital
+        self.lookback          = lookback
+        self.slippage_model    = slippage_model
         self.use_partial_fills = use_partial_fills
+        self.max_selected      = max_selected
 
     def run(self) -> BacktestResult:
         result      = BacktestResult()
@@ -107,7 +139,6 @@ class BacktestEngine:
             new_trades_today = 0
 
             # ── Build indicator snapshot for today ───────────────────
-            # Slice per-symbol data first; then batch-compute RS before indicators
             today_stock_data: dict = {}
             for symbol, full_df in self.data.items():
                 if symbol == MARKET_INDEX_SYMBOL:
@@ -145,8 +176,6 @@ class BacktestEngine:
             regime = detect_regime(index_hist)
             result.regime_log[today] = regime
 
-            # UNKNOWN regime → block buys (same as BEAR_TREND).
-            # Never default to allowing trades when index data is insufficient.
             market_bullish = is_buy_allowed(regime)
             if regime == "UNKNOWN":
                 logger.debug(
@@ -168,13 +197,20 @@ class BacktestEngine:
                 price = ind["close"]
                 atr   = float(ind.get("atr", 0) or 0)
                 pos   = update_trailing_stop(pos, price, atr)
+
+                # Time-based exit: checked here using backtest date
+                hold_days = (today - pos.entry_date).days
+                from config.settings import MAX_HOLD_DAYS
+                if hold_days >= MAX_HOLD_DAYS:
+                    positions_to_close.append((
+                        pos,
+                        self._get_execution_price(pos.symbol, today, all_dates, i, "sell", ind)[0],
+                        f"TIME_EXIT: held {hold_days} days ≥ {MAX_HOLD_DAYS}|slippage_applied",
+                    ))
+                    continue
+
                 should_exit, reason = check_exit(pos, price, ind)
-
-                # Time-based exit handled inside check_exit (MAX_HOLD_DAYS)
-                _ = None
-
                 if should_exit:
-                    # Execution price = next bar's open with slippage
                     exec_price, slip_note = self._get_execution_price(
                         pos.symbol, today, all_dates, i, "sell", ind
                     )
@@ -202,39 +238,135 @@ class BacktestEngine:
             open_positions = updated_positions
             held = {pos.symbol for pos in open_positions}
 
-            # ── Screen BUY candidates ─────────────────────────────────
-            if not market_bullish:
-                # Bear regime: no new buys, record equity and continue
-                pv = cash + portfolio_invested_value(open_positions, prices)
-                result.equity_curve[today] = round(pv, 2)
-                result.cash_curve[today]   = round(cash, 2)
-                continue
-
-            min_score = regime_min_score(regime)
-            size_factor = regime_position_factor(regime)
-
-            candidates = []
-            for symbol, ind in indicators.items():
-                if symbol in held:
-                    continue
-                ok, _ = check_entry(ind, symbol=symbol, regime=regime)
-                if not ok:
-                    continue
-                score = score_signal(ind)
-                if score < min_score:
-                    continue
-                candidates.append((score, symbol, ind))
-            candidates.sort(reverse=True)
-
             portfolio_val = cash + portfolio_invested_value(open_positions, prices)
             peak_value    = max(peak_value, portfolio_val)
 
+            # ── Screen BUY candidates ─────────────────────────────────
+            if not market_bullish:
+                result.equity_curve[today] = round(portfolio_val, 2)
+                result.cash_curve[today]   = round(cash, 2)
+                logger.debug("[Day] %s  regime=%s  → no buys", today, regime)
+                continue
+
+            min_score   = regime_min_score(regime)
+            size_factor = regime_position_factor(regime)
+
+            # ── Full scan with per-symbol decision logging ────────────
+            total_scanned   = len(indicators) - len(held)
+            rs_passed_syms: set[str]      = set()
+            signal_passed_syms: set[str]  = set()
+            rejected_log: list[dict]      = []
+            rank_scores_map: dict         = {}
+            rs_ranks_map: dict            = {}
+
+            raw_candidates = []
+            for symbol, ind in indicators.items():
+                if symbol in held:
+                    continue
+
+                rs_rank = float(ind.get("rs_rank", 0) or 0)
+                rs_ranks_map[symbol] = rs_rank
+                rank_score = compute_rank_score(ind)
+                rank_scores_map[symbol] = rank_score
+
+                ok, reason = check_entry(ind, symbol=symbol, regime=regime)
+                if not ok:
+                    rejected_log.append({
+                        "date":   str(today),
+                        "symbol": symbol,
+                        "reason": reason,
+                    })
+                    continue
+
+                rs_passed_syms.add(symbol)
+
+                score = score_signal(ind)
+                if score < min_score:
+                    rejected_log.append({
+                        "date":   str(today),
+                        "symbol": symbol,
+                        "reason": f"Score {score:.1f} < min_score {min_score:.0f}",
+                    })
+                    continue
+
+                signal_passed_syms.add(symbol)
+                raw_candidates.append((score, symbol, ind))
+
+            # ── Dynamic filter relaxation (if zero candidates) ────────
+            relaxed = False
+            if not raw_candidates and signal_passed_syms == set():
+                # Zero signals — try once with relaxed score threshold
+                relaxed_min = max(_DYNAMIC_RELAX_MIN_SCORE, min_score - _DYNAMIC_RELAX_STEP)
+                if relaxed_min < min_score:
+                    for symbol, ind in indicators.items():
+                        if symbol in held or symbol in {r["symbol"] for r in rejected_log if "Score" not in r.get("reason", "")}:
+                            continue
+                        score = score_signal(ind)
+                        if score >= relaxed_min:
+                            ok, _ = check_entry(ind, symbol=symbol, regime=regime)
+                            if ok and symbol not in signal_passed_syms:
+                                signal_passed_syms.add(symbol)
+                                raw_candidates.append((score, symbol, ind))
+                    if raw_candidates:
+                        relaxed = True
+                        logger.info(
+                            "[Day] %s  RELAXED filters: min_score %.0f→%.0f — found %d candidates",
+                            today, min_score, relaxed_min, len(raw_candidates),
+                        )
+
+            raw_candidates.sort(reverse=True)
+
+            # ── Rank candidates and select top N ─────────────────────
+            candidates = rank_and_select(raw_candidates, max_stocks=self.max_selected, verbose=True)
+
+            selected_syms = {sym for _, sym, _ in candidates}
+
+            # ── Daily scan summary log ────────────────────────────────
+            scan_summary = {
+                "date":            str(today),
+                "regime":          regime,
+                "portfolio_value": round(portfolio_val, 2),
+                "total_scanned":   total_scanned,
+                "rs_passed":       len(rs_passed_syms),
+                "signals":         len(signal_passed_syms),
+                "selected":        len(selected_syms),
+                "open_positions":  len(open_positions),
+                "relaxed_filters": relaxed,
+            }
+            result.daily_scan_log.append(scan_summary)
+
+            logger.info(
+                "[Day] %s  regime=%-10s  capital=₹%,.0f  "
+                "scanned=%d  rs_pass=%d  signals=%d  selected=%d",
+                today, regime, portfolio_val,
+                total_scanned, len(rs_passed_syms),
+                len(signal_passed_syms), len(selected_syms),
+            )
+
+            # ── Per-stock decision log ────────────────────────────────
+            decision_entries = build_decision_log(
+                all_scanned=list(indicators.keys() - held),
+                rs_passed=rs_passed_syms,
+                signal_passed=signal_passed_syms,
+                selected=selected_syms,
+                rank_scores=rank_scores_map,
+                rs_ranks=rs_ranks_map,
+            )
+            result.decision_log.extend(decision_entries)
+
+            # Log rejected trades (for debugging)
+            for rej in rejected_log:
+                logger.debug(
+                    "[Rejected] %-12s  %s", rej["symbol"], rej["reason"]
+                )
+
             # ── Execute buys ──────────────────────────────────────────
             for score, symbol, ind in candidates:
-                allowed, _ = can_open_new_trades(
+                allowed, reason = can_open_new_trades(
                     new_trades_today, open_positions, portfolio_val, peak_value
                 )
                 if not allowed:
+                    logger.debug("[Day] %s: buy limit — %s", today, reason)
                     break
 
                 exec_price, slip_note = self._get_execution_price(
@@ -251,6 +383,7 @@ class BacktestEngine:
                 sc_factor = score_to_size_factor(score)
                 qt_factor = tier_size_factor(symbol)
 
+                # Regime size factor baked into drawdown_factor product
                 shares = calculate_shares(
                     portfolio_val, exec_price, stops["stop_loss"],
                     cash, atr=atr,
@@ -277,7 +410,7 @@ class BacktestEngine:
                 if not ok:
                     continue
 
-                charges = buy_charges(tv)
+                charges   = buy_charges(tv)
                 total_cost = tv + charges.total
                 if total_cost > cash:
                     continue
@@ -291,6 +424,15 @@ class BacktestEngine:
                 cash -= total_cost
                 open_positions.append(pos)
                 new_trades_today += 1
+
+                pos_size_pct = tv / portfolio_val * 100 if portfolio_val > 0 else 0
+                logger.info(
+                    "[Trade] BUY %-12s  qty=%d  price=₹%.2f  "
+                    "stop=₹%.2f  size=%.1f%%  score=%.1f  rank=%.1f",
+                    symbol, shares, exec_price,
+                    stops["stop_loss"], pos_size_pct, score,
+                    rank_scores_map.get(symbol, 0),
+                )
 
             # ── Record equity curve ───────────────────────────────────
             pv = cash + portfolio_invested_value(open_positions, prices)
@@ -338,8 +480,6 @@ class BacktestEngine:
         Applies slippage model on top.
         """
         today_close = ind.get("close", 0)
-        today_high  = ind.get("high", today_close)
-        today_low   = ind.get("low", today_close)
         atr         = ind.get("atr", 0)
 
         # Get next bar data
