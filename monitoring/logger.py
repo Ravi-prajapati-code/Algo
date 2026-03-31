@@ -31,6 +31,8 @@ LOG_DIR = Path(os.getenv("LOG_DIR") or "logs")
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 TRADE_LOG_FILE       = LOG_DIR / "trades.jsonl"
+REJECTED_LOG_FILE    = LOG_DIR / "rejected_trades.jsonl"
+DAILY_SCAN_LOG_FILE  = LOG_DIR / "daily_scan.jsonl"
 ERROR_LOG_FILE       = LOG_DIR / "errors.jsonl"
 PERFORMANCE_LOG_FILE = LOG_DIR / "performance.jsonl"
 APP_LOG_FILE         = LOG_DIR / "app.log"
@@ -153,6 +155,62 @@ def log_error(
 def log_performance(metrics: dict) -> None:
     """Append a daily performance snapshot to performance.jsonl."""
     _append_jsonl(PERFORMANCE_LOG_FILE, {"event": "PERFORMANCE", **metrics})
+
+
+def log_rejected_trade(data: dict) -> None:
+    """
+    Append a rejected trade record to rejected_trades.jsonl.
+
+    Expected fields in data:
+      date, symbol, reason  — plus any additional context fields.
+
+    Example usage:
+        log_rejected_trade({
+            "date": "2024-03-15", "symbol": "RELIANCE",
+            "reason": "RS rank too low: 22nd percentile",
+        })
+    """
+    _append_jsonl(REJECTED_LOG_FILE, {
+        "event": "REJECTED",
+        "ts":    datetime.utcnow().isoformat() + "Z",
+        **data,
+    })
+
+
+def log_daily_scan(data: dict) -> None:
+    """
+    Append a daily scan summary to daily_scan.jsonl.
+
+    Expected fields in data:
+      date, regime, portfolio_value,
+      total_scanned, rs_passed, signals, selected,
+      open_positions, relaxed_filters
+
+    Also includes per-stock decision list if 'decisions' key is present.
+
+    Example usage:
+        log_daily_scan({
+            "date": "2024-03-15",
+            "regime": "BULL_TREND",
+            "portfolio_value": 82350.0,
+            "total_scanned": 45,
+            "rs_passed": 22,
+            "signals": 8,
+            "selected": 3,
+            "open_positions": 2,
+            "relaxed_filters": False,
+            "decisions": [
+                {"symbol": "RELIANCE", "rs_pass": "PASS", "signal": "YES",
+                 "rank_score": 87.2, "rs_rank": 78.0, "selected": "YES"},
+                ...
+            ],
+        })
+    """
+    _append_jsonl(DAILY_SCAN_LOG_FILE, {
+        "event": "DAILY_SCAN",
+        "ts":    datetime.utcnow().isoformat() + "Z",
+        **data,
+    })
 
 
 def log_risk_event(event_type: str, details: dict) -> None:

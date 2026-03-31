@@ -20,12 +20,13 @@ def _pos(symbol, sector, price=100.0, shares=10):
 
 class TestPositionSizer:
     def test_basic_sizing(self):
-        # ₹75,000 portfolio, 2% risk, entry 100, stop 94 → risk/share=6
-        # max_loss=₹1500 → 250 shares by risk
-        # but stock allocation cap = 20% of 75k = ₹15k → 150 shares
-        # min(250, 150, 750) = 150
+        # ₹75,000 portfolio, 1% risk, entry 100, stop 94 → risk/share=6
+        # max_loss=₹750 → 125 shares by risk
+        # stock allocation cap = 20% of 75k = ₹15k → 150 shares
+        # cash cap = 75k*0.95/100 = 712 shares
+        # min(125, 150, 712) = 125
         shares = calculate_shares(75_000, 100, 94, 75_000)
-        assert shares == 150
+        assert shares == 125
 
     def test_capped_by_allocation(self):
         # If shares_by_risk > max_stock_allocation cap, should be capped

@@ -25,11 +25,12 @@ CURRENCY  = "INR"
 # PORTFOLIO
 # ──────────────────────────────────────────────
 INITIAL_CAPITAL         = float(os.getenv("INITIAL_CAPITAL") or 75000)
-MAX_OPEN_POSITIONS      = int(os.getenv("MAX_OPEN_POSITIONS") or 15)
-MAX_NEW_TRADES_PER_DAY  = int(os.getenv("MAX_NEW_TRADES_PER_DAY") or 5)
+MAX_OPEN_POSITIONS      = int(os.getenv("MAX_OPEN_POSITIONS") or 10)
+MAX_NEW_TRADES_PER_DAY  = int(os.getenv("MAX_NEW_TRADES_PER_DAY") or 3)
+MAX_SELECTED_STOCKS     = int(os.getenv("MAX_SELECTED_STOCKS") or 5)   # Top N ranked stocks per day
 MAX_STOCK_ALLOCATION_PCT    = 0.20   # Max 20 % portfolio in any single stock
 MAX_SECTOR_ALLOCATION_PCT   = 0.30   # Max 30 % portfolio in any single sector
-MAX_RISK_PER_TRADE_PCT      = 0.02   # Risk 2 % of portfolio per trade
+MAX_RISK_PER_TRADE_PCT      = 0.01   # Risk 1 % of portfolio per trade (compounding)
 CASH_RESERVE_PCT            = 0.10   # Keep 10 % cash as buffer
 
 # ──────────────────────────────────────────────
@@ -59,11 +60,11 @@ MARKET_FILTER_ENABLED   = True       # Set False to disable (comparison only)
 # ──────────────────────────────────────────────
 # STRATEGY — EXIT / RISK
 # ──────────────────────────────────────────────
-STOP_LOSS_PCT           = 0.06       # 6 % hard stop below entry
+STOP_LOSS_PCT           = 0.02       # 2 % hard stop below entry (or ATR)
 TAKE_PROFIT_PCT         = 0.13       # 13 % take profit above entry
 TRAILING_STOP_PCT       = 0.05       # 5 % trailing stop from peak
 RSI_OVERBOUGHT_EXIT     = 75         # Force exit if RSI ≥ 75
-MAX_HOLD_DAYS           = 60         # Time-based exit after 60 calendar days
+MAX_HOLD_DAYS           = 10         # Time-based exit after 10 calendar days
 
 # ──────────────────────────────────────────────
 # RISK MANAGEMENT (Phase 1 — RiskManager)
@@ -91,6 +92,7 @@ ML_MODEL_DIR            = "ml/models"
 # ──────────────────────────────────────────────
 # DATA
 # ──────────────────────────────────────────────
+PARTIAL_REGIME_MIN_CANDLES = 50       # Minimum candles for PARTIAL regime trading
 LOOKBACK_DAYS           = 200         # Days of OHLCV history for indicators
 DATA_CACHE_DB           = "db/trading.db"
 OUTPUTS_DIR             = "outputs"
